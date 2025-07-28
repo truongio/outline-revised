@@ -1,0 +1,13 @@
+{
+  "name": "article-reader",
+  "version": "1.0.0",
+  "description": "A beautiful article reader that formats articles for better readability",
+  "main": "index.html",
+  "scripts": {
+    "dev": "python -m http.server 3000",
+    "build": "echo 'Static site - no build needed'"
+  },
+  "keywords": ["article", "reader", "formatting", "readability"],
+  "author": "",
+  "license": "MIT"
+}

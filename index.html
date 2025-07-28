@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Article Reader</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Article Reader</h1>
+            <p>Paste any article URL to get a beautifully formatted, readable version</p>
+        </header>
+        
+        <div class="input-section">
+            <input type="url" id="urlInput" placeholder="Paste article URL here..." />
+            <button id="extractBtn">Format Article</button>
+        </div>
+        
+        <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <p>Extracting article...</p>
+        </div>
+        
+        <div id="error" class="error hidden"></div>
+        
+        <article id="articleContent" class="article-content hidden">
+            <header class="article-header">
+                <h1 id="articleTitle"></h1>
+                <div class="article-meta">
+                    <span id="articleAuthor"></span>
+                    <span id="articleDate"></span>
+                </div>
+            </header>
+            <div id="articleBody" class="article-body"></div>
+        </article>
+    </div>
+    
+    <script src="script.js"></script>
+</body>
+</html>
