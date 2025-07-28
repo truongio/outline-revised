@@ -68,18 +68,29 @@ class ArticleReader {
         }
     }
     
-    async fetchArticle(url) {
-        const response = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
-        
-        if (!response.ok) {
-            throw new Error('Failed to fetch the page');
+    async fetchArticle(url, retries = 3) {
+        for (let attempt = 1; attempt <= retries; attempt++) {
+            try {
+                const response = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(data.contents, 'text/html');
+                
+                return this.parseArticle(doc, url);
+            } catch (error) {
+                if (attempt === retries) {
+                    throw new Error(`Failed to fetch article after ${retries} attempts: ${error.message}`);
+                }
+                
+                // Wait before retrying (exponential backoff)
+                await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+            }
         }
-        
-        const data = await response.json();
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(data.contents, 'text/html');
-        
-        return this.parseArticle(doc, url);
     }
     
     parseArticle(doc, url) {
@@ -93,7 +104,7 @@ class ArticleReader {
         article.title = this.extractTitle(doc);
         article.author = this.extractAuthor(doc);
         article.date = this.extractDate(doc);
-        article.content = this.extractContent(doc);
+        article.content = this.extractContent(doc, url);
         
         return article;
     }
@@ -177,7 +188,12 @@ class ArticleReader {
         return '';
     }
     
-    extractContent(doc) {
+    extractContent(doc, url = '') {
+        // Special handling for Paul Graham's site
+        if (url.includes('paulgraham.com')) {
+            return this.extractPaulGrahamContent(doc);
+        }
+        
         const contentSelectors = [
             'article',
             '[class*="article-content"]',
@@ -185,7 +201,10 @@ class ArticleReader {
             '[class*="entry-content"]',
             '[class*="content-body"]',
             'main',
-            '.content'
+            '.content',
+            'table',  // Paul Graham uses tables for layout
+            'td',     // Content often in table cells
+            'body'    // Ultimate fallback
         ];
         
         for (const selector of contentSelectors) {
@@ -198,6 +217,96 @@ class ArticleReader {
         const fallbackContent = doc.querySelector('body');
         return fallbackContent ? this.cleanContent(fallbackContent) : '';
     }
+    
+    extractPaulGrahamContent(doc) {
+        // Paul Graham's site uses a specific table layout
+        // The main content is in a table cell, usually the rightmost one with width="435"
+        const mainTable = doc.querySelector('table[border="0"][cellspacing="0"][cellpadding="0"]');
+        
+        if (mainTable) {
+            // Look for the content cell - usually has width="435"
+            const contentCell = mainTable.querySelector('td[width="435"]') || 
+                               mainTable.querySelector('td:last-child');
+            
+            if (contentCell) {
+                return this.cleanPaulGrahamContent(contentCell);
+            }
+        }
+        
+        // Fallback: look for the main content area by finding the largest td
+        const allCells = doc.querySelectorAll('td');
+        let largestCell = null;
+        let maxTextLength = 0;
+        
+        allCells.forEach(cell => {
+            const textLength = cell.textContent.length;
+            if (textLength > maxTextLength) {
+                maxTextLength = textLength;
+                largestCell = cell;
+            }
+        });
+        
+        if (largestCell && maxTextLength > 1000) {
+            return this.cleanPaulGrahamContent(largestCell);
+        }
+        
+        // Final fallback
+        return this.cleanContent(doc.body);
+    }
+    
+    cleanPaulGrahamContent(container) {
+        const clone = container.cloneNode(true);
+        
+        // Remove unwanted elements specific to Paul Graham's site
+        const unwantedSelectors = [
+            'script',
+            'style',
+            'map',        // Image maps for navigation
+            'img[usemap]', // Navigation images
+            'area',       // Image map areas
+            'hr',         // Horizontal rules at bottom
+            'table[border="0"] img', // Navigation images in tables
+        ];
+        
+        unwantedSelectors.forEach(selector => {
+            const elements = clone.querySelectorAll(selector);
+            elements.forEach(el => el.remove());
+        });
+        
+        // Remove "Thanks" section at the end (usually after the last <br><br>)
+        const html = clone.innerHTML;
+        const thanksIndex = html.toLowerCase().indexOf('<b>thanks</b>');
+        if (thanksIndex !== -1) {
+            clone.innerHTML = html.substring(0, thanksIndex);
+        }
+        
+        // Handle Paul Graham's <br><br> separated content
+        if (clone.innerHTML.includes('<br><br>')) {
+            const htmlContent = clone.innerHTML;
+            const paragraphs = htmlContent.split(/<br\s*\/?>\s*<br\s*\/?>/i)
+                .map(p => p.replace(/<br\s*\/?>/gi, ' ').trim())
+                .filter(p => {
+                    const text = p.replace(/<[^>]*>/g, '').trim();
+                    return text.length > 20 && 
+                           !this.isUnwantedContent(text) &&
+                           !text.match(/^(home|essays|h&p|books|yc|arc|bel|lisp|spam|faqs|raqs|quotes|rss|bio|twitter|mastodon)$/i);
+                });
+            
+            if (paragraphs.length > 0) {
+                const contentDiv = document.createElement('div');
+                paragraphs.forEach(paragraphHtml => {
+                    const p = document.createElement('p');
+                    p.innerHTML = paragraphHtml;
+                    contentDiv.appendChild(p);
+                });
+                return contentDiv.innerHTML;
+            }
+        }
+        
+        // Fallback to regular cleaning
+        return this.cleanContent(clone);
+    }
+    
     
     cleanContent(container) {
         const clone = container.cloneNode(true);
@@ -225,18 +334,104 @@ class ArticleReader {
             elements.forEach(el => el.remove());
         });
         
-        const paragraphs = clone.querySelectorAll('p');
-        const validParagraphs = Array.from(paragraphs).filter(p => {
-            const text = p.textContent.trim();
-            return text.length > 50 && !this.isUnwantedContent(text);
+        // Remove anchor links and icons more comprehensively
+        const anchorLinks = clone.querySelectorAll('a[href^="#"], a[class*="anchor"], a[class*="permalink"], a[class*="link"]');
+        anchorLinks.forEach(el => {
+            // Remove if it's just an icon (empty text or contains SVG/icon)
+            if (el.textContent.trim() === '' || el.querySelector('svg') || el.querySelector('[class*="icon"]') || 
+                el.innerHTML.includes('🔗') || el.innerHTML.includes('#')) {
+                el.remove();
+            }
         });
         
-        if (validParagraphs.length > 0) {
+        // Also remove any remaining SVGs and icons that might be standalone
+        const icons = clone.querySelectorAll('svg, [class*="icon"]:empty, .anchor-icon');
+        icons.forEach(el => {
+            if (el.textContent.trim() === '') {
+                el.remove();
+            }
+        });
+        
+        // Clean up leftover minimal text nodes (dots, spaces, etc.)
+        const textNodes = clone.querySelectorAll('*');
+        textNodes.forEach(el => {
+            const text = el.textContent.trim();
+            // Remove elements that only contain minimal punctuation or whitespace
+            if (text.length <= 2 && /^[•·◦‣⁃▪▫\s\.]*$/.test(text) && !el.querySelector('*')) {
+                el.remove();
+            }
+        });
+        
+        const contentElements = clone.querySelectorAll('p, ul, ol, h1, h2, h3, h4, h5, h6, blockquote');
+        const validElements = Array.from(contentElements).filter(el => {
+            const text = el.textContent.trim();
+            const tagName = el.tagName.toLowerCase();
+            
+            // Always include headings
+            if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tagName)) {
+                return text.length > 0 && !this.isUnwantedContent(text);
+            }
+            
+            // Include lists if they have content
+            if (['ul', 'ol'].includes(tagName)) {
+                return el.children.length > 0;
+            }
+            
+            // For paragraphs and blockquotes, use more lenient length filter for simple sites
+            return text.length > 20 && !this.isUnwantedContent(text);
+        });
+        
+        if (validElements.length > 0) {
             const contentDiv = document.createElement('div');
-            validParagraphs.forEach(p => {
-                contentDiv.appendChild(p.cloneNode(true));
+            
+            // Filter out elements that are contained within other selected elements
+            const uniqueElements = validElements.filter(el => {
+                return !validElements.some(otherEl => 
+                    otherEl !== el && otherEl.contains(el)
+                );
+            });
+            
+            uniqueElements.forEach(el => {
+                contentDiv.appendChild(el.cloneNode(true));
             });
             return contentDiv.innerHTML;
+        }
+        
+        // If no structured elements found, try to extract and convert to paragraphs
+        // Handle <br><br> separated content (like Paul Graham's site)
+        if (clone.innerHTML.includes('<br><br>')) {
+            const htmlContent = clone.innerHTML;
+            const paragraphs = htmlContent.split(/<br\s*\/?>\s*<br\s*\/?>/i)
+                .map(p => p.replace(/<br\s*\/?>/gi, ' ').trim())
+                .filter(p => {
+                    const text = p.replace(/<[^>]*>/g, '').trim();
+                    return text.length > 20 && !this.isUnwantedContent(text);
+                });
+            
+            if (paragraphs.length > 0) {
+                const contentDiv = document.createElement('div');
+                paragraphs.forEach(paragraphHtml => {
+                    const p = document.createElement('p');
+                    p.innerHTML = paragraphHtml;
+                    contentDiv.appendChild(p);
+                });
+                return contentDiv.innerHTML;
+            }
+        }
+        
+        // Fallback: try plain text splitting
+        const text = clone.textContent.trim();
+        if (text.length > 100) {
+            const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 20);
+            if (paragraphs.length > 0) {
+                const contentDiv = document.createElement('div');
+                paragraphs.forEach(paragraphText => {
+                    const p = document.createElement('p');
+                    p.textContent = paragraphText.trim();
+                    contentDiv.appendChild(p);
+                });
+                return contentDiv.innerHTML;
+            }
         }
         
         return clone.innerHTML;
